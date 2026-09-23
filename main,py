@@ -1,0 +1,528 @@
+```python
+import streamlit as st
+import requests
+import pandas as pd
+import re
+from datetime import date, timedelta
+import plotly.express as px
+
+
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
+st.set_page_config(
+    page_title="학교 급식 원산지 탐구",
+    page_icon="🍚",
+    layout="wide"
+)
+
+st.title("🍚 학교 급식 원산지 탐구")
+st.write("주변 학교 급식에 쓰인 재료들의 원산지를 살펴봅니다.")
+
+
+# --------------------------------------------------
+# 나이스 API 설정
+# --------------------------------------------------
+BASE_URL = "https://open.neis.go.kr/hub"
+
+try:
+    API_KEY = st.secrets["NEIS_KEY"]
+except Exception:
+    API_KEY = ""
+
+
+# --------------------------------------------------
+# 학교 검색
+# --------------------------------------------------
+def search_school(school_name):
+    url = f"{BASE_URL}/schoolInfo"
+
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "pIndex": 1,
+        "pSize": 5,
+        "SCHUL_NM": school_name
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "schoolInfo" not in data:
+        return pd.DataFrame()
+
+    try:
+        rows = data["schoolInfo"][1]["row"]
+    except (KeyError, IndexError):
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------
+# 급식 데이터 가져오기
+# --------------------------------------------------
+def get_meals(atpt_code, school_code, start_date, end_date):
+
+    all_rows = []
+    page = 1
+
+    while True:
+
+        url = f"{BASE_URL}/mealServiceDietInfo"
+
+        params = {
+            "KEY": API_KEY,
+            "Type": "json",
+            "ATPT_OFCDC_SC_CODE": atpt_code,
+            "SD_SCHUL_CODE": school_code,
+            "MMEAL_SC_CODE": "2",
+            "MLSV_FROM_YMD": start_date,
+            "MLSV_TO_YMD": end_date,
+            "pSize": 1000,
+            "pIndex": page
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "mealServiceDietInfo" not in data:
+            break
+
+        try:
+            head = data["mealServiceDietInfo"][0]["head"]
+            rows = data["mealServiceDietInfo"][1]["row"]
+        except (KeyError, IndexError):
+            break
+
+        all_rows.extend(rows)
+
+        # 전체 데이터 개수 확인
+        total_count = 0
+
+        try:
+            for item in head:
+                if "list_total_count" in item:
+                    total_count = int(item["list_total_count"])
+                    break
+        except Exception:
+            pass
+
+        if len(all_rows) >= total_count or len(rows) < 1000:
+            break
+
+        page += 1
+
+    return pd.DataFrame(all_rows)
+
+
+# --------------------------------------------------
+# 원산지 정보에서 국가 추출
+# --------------------------------------------------
+def extract_origins(text):
+
+    if not isinstance(text, str):
+        return []
+
+    origins = []
+
+    # 줄바꿈 / <br/> 등 정리
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+
+    lines = text.splitlines()
+
+    for line in lines:
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # 예:
+        # 쌀 : 국내산
+        # 돼지고기 : 국내산
+        # 쇠고기 : 호주산
+        # 닭고기 : 국내산
+        if ":" in line:
+            parts = line.split(":", 1)
+            origin = parts[1].strip()
+
+        elif "：" in line:
+            parts = line.split("：", 1)
+            origin = parts[1].strip()
+
+        else:
+            continue
+
+        # 여러 국가가 섞여 있는 경우
+        # 쉼표, / 등으로 나누어 처리
+        origin_parts = re.split(r"[,/]", origin)
+
+        for item in origin_parts:
+
+            item = item.strip()
+
+            if not item:
+                continue
+
+            # 괄호 안 설명 제거
+            item = re.sub(r"\([^)]*\)", "", item).strip()
+
+            # 대표적인 표기 정리
+            if "국내산" in item or "국산" in item:
+                origins.append("국내산")
+            elif "호주" in item:
+                origins.append("호주")
+            elif "미국" in item:
+                origins.append("미국")
+            elif "중국" in item:
+                origins.append("중국")
+            elif "브라질" in item:
+                origins.append("브라질")
+            elif "뉴질랜드" in item:
+                origins.append("뉴질랜드")
+            elif "캐나다" in item:
+                origins.append("캐나다")
+            elif "스페인" in item:
+                origins.append("스페인")
+            elif "러시아" in item:
+                origins.append("러시아")
+            elif "베트남" in item:
+                origins.append("베트남")
+            elif "필리핀" in item:
+                origins.append("필리핀")
+            elif "태국" in item:
+                origins.append("태국")
+            elif "칠레" in item:
+                origins.append("칠레")
+            elif "아르헨티나" in item:
+                origins.append("아르헨티나")
+            elif "독일" in item:
+                origins.append("독일")
+            elif "이탈리아" in item:
+                origins.append("이탈리아")
+            elif "프랑스" in item:
+                origins.append("프랑스")
+            elif "영국" in item:
+                origins.append("영국")
+            elif "일본" in item:
+                origins.append("일본")
+            else:
+                # '국내산 및 호주산' 같은 경우를 위해
+                # 국가명이 포함되어 있으면 그대로 사용
+                if "산" in item:
+                    origins.append(item)
+
+    return origins
+
+
+# --------------------------------------------------
+# API 키 확인
+# --------------------------------------------------
+if not API_KEY:
+    st.error("NEIS_KEY가 설정되어 있지 않습니다.")
+    st.info(
+        "Streamlit Cloud의 Settings → Secrets에서 "
+        "NEIS_KEY를 추가해 주세요."
+    )
+    st.stop()
+
+
+# --------------------------------------------------
+# 학교 입력
+# --------------------------------------------------
+st.subheader("1. 학교 찾기")
+
+school_name = st.text_input(
+    "학교 이름을 입력하세요",
+    placeholder="예: ○○중학교"
+)
+
+if school_name:
+
+    try:
+        schools = search_school(school_name)
+
+        if schools.empty:
+            st.warning("검색된 학교가 없습니다.")
+            st.stop()
+
+        # 학교 선택용 표시
+        school_options = []
+
+        for _, row in schools.iterrows():
+            name = row.get("SCHUL_NM", "")
+            location = row.get("LCTN_SC_NM", "")
+            school_options.append(f"{name} ({location})")
+
+        selected = st.selectbox(
+            "학교를 선택하세요",
+            school_options
+        )
+
+        selected_index = school_options.index(selected)
+        school = schools.iloc[selected_index]
+
+        school_name_real = school["SCHUL_NM"]
+        atpt_code = school["ATPT_OFCDC_SC_CODE"]
+        school_code = school["SD_SCHUL_CODE"]
+
+        st.success(f"선택한 학교: {school_name_real}")
+
+    except Exception as e:
+        st.error("학교 정보를 가져오는 중 문제가 발생했습니다.")
+        st.stop()
+
+
+    # --------------------------------------------------
+    # 기간 선택
+    # --------------------------------------------------
+    st.subheader("2. 조사 기간")
+
+    today = date.today()
+    default_start = today - timedelta(days=30)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        start = st.date_input(
+            "시작일",
+            value=default_start,
+            max_value=today
+        )
+
+    with col2:
+        end = st.date_input(
+            "끝일",
+            value=today,
+            max_value=today
+        )
+
+    if start > end:
+        st.error("시작일이 끝일보다 늦을 수 없습니다.")
+        st.stop()
+
+
+    # --------------------------------------------------
+    # 급식 조회
+    # --------------------------------------------------
+    if st.button("🍚 급식 원산지 분석하기", type="primary"):
+
+        start_str = start.strftime("%Y%m%d")
+        end_str = end.strftime("%Y%m%d")
+
+        with st.spinner("급식 정보를 가져오고 있습니다..."):
+
+            try:
+                meals = get_meals(
+                    atpt_code,
+                    school_code,
+                    start_str,
+                    end_str
+                )
+            except Exception as e:
+                st.error("급식 정보를 가져오는 중 오류가 발생했습니다.")
+                st.stop()
+
+
+        if meals.empty:
+            st.warning(
+                "선택한 기간에 중식 급식 자료가 없습니다."
+            )
+            st.stop()
+
+
+        # --------------------------------------------------
+        # 원산지 정보 확인
+        # --------------------------------------------------
+        origin_column = None
+
+        # 나이스 데이터에서 사용되는 원산지 컬럼을 우선 확인
+        for column in [
+            "ORPLC_INFO",
+            "ORPLC_INFO"
+        ]:
+            if column in meals.columns:
+                origin_column = column
+                break
+
+        if origin_column is None:
+            st.error(
+                "급식 자료에서 원산지 정보 열을 찾지 못했습니다."
+            )
+            st.stop()
+
+
+        # --------------------------------------------------
+        # 원산지 추출
+        # --------------------------------------------------
+        origin_list = []
+
+        for _, row in meals.iterrows():
+
+            origins = extract_origins(
+                row.get(origin_column, "")
+            )
+
+            for origin in origins:
+                origin_list.append({
+                    "급식일": row.get("MLSV_YMD", ""),
+                    "원산지": origin
+                })
+
+
+        origin_df = pd.DataFrame(origin_list)
+
+
+        if origin_df.empty:
+            st.warning(
+                "선택한 기간의 급식 자료에서 "
+                "분석할 원산지 정보를 찾지 못했습니다."
+            )
+            st.stop()
+
+
+        # --------------------------------------------------
+        # 원산지별 집계
+        # --------------------------------------------------
+        counts = (
+            origin_df["원산지"]
+            .value_counts()
+            .reset_index()
+        )
+
+        counts.columns = ["원산지", "등장 횟수"]
+
+        counts = counts.sort_values(
+            "등장 횟수",
+            ascending=False
+        )
+
+
+        # --------------------------------------------------
+        # 가장 많이 나온 원산지
+        # --------------------------------------------------
+        top_origin = counts.iloc[0]["원산지"]
+        top_count = counts.iloc[0]["등장 횟수"]
+
+
+        st.divider()
+
+        st.subheader("3. 분석 결과")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "급식일 수",
+                f"{len(meals):,}일"
+            )
+
+        with col2:
+            st.metric(
+                "확인한 원산지 기록",
+                f"{len(origin_df):,}건"
+            )
+
+        with col3:
+            st.metric(
+                "가장 많이 나온 원산지",
+                top_origin
+            )
+
+
+        st.success(
+            f"🥇 가장 많이 등장한 원산지는 **{top_origin}**입니다. "
+            f"총 **{top_count:,}회** 확인되었습니다."
+        )
+
+
+        # --------------------------------------------------
+        # 그래프
+        # --------------------------------------------------
+        st.subheader("4. 원산지별 등장 횟수")
+
+        fig = px.bar(
+            counts,
+            x="원산지",
+            y="등장 횟수",
+            text="등장 횟수",
+            title="급식에 등장한 원산지"
+        )
+
+        fig.update_traces(
+            textposition="outside"
+        )
+
+        fig.update_layout(
+            xaxis_title="원산지",
+            yaxis_title="등장 횟수",
+            hovermode="x unified"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+
+        st.write(
+            "**이 그래프로 알 수 있는 것:** "
+            "선택한 기간 동안 학교 급식 재료의 원산지가 "
+            "어디에 많이 분포하는지 비교할 수 있습니다."
+        )
+
+
+        # --------------------------------------------------
+        # 집계표
+        # --------------------------------------------------
+        st.subheader("5. 원산지별 집계표")
+
+        display_df = counts.copy()
+
+        display_df["등장 비율"] = (
+            display_df["등장 횟수"]
+            / display_df["등장 횟수"].sum()
+            * 100
+        ).round(1)
+
+        display_df["등장 횟수"] = (
+            display_df["등장 횟수"]
+            .map(lambda x: f"{x:,}")
+        )
+
+        display_df["등장 비율"] = (
+            display_df["등장 비율"]
+            .map(lambda x: f"{x}%")
+        )
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        # --------------------------------------------------
+        # 원산지 원자료
+        # --------------------------------------------------
+        with st.expander("원산지 기록 자세히 보기"):
+
+            detail = origin_df.copy()
+
+            detail["급식일"] = pd.to_datetime(
+                detail["급식일"],
+                format="%Y%m%d",
+                errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+
+            st.dataframe(
+                detail,
+                use_container_width=True,
+                hide_index=True
+            )
+```
