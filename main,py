@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -525,4 +524,3 @@ if school_name:
                 use_container_width=True,
                 hide_index=True
             )
-```
